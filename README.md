@@ -53,6 +53,14 @@ pytest                            # tests
 `COINS` (vacío = todos), `RECONCILE_S` (300), `EVENT_MIN_USD` (100000), `BIAS_THRESHOLD` (0.25),
 `MM_TURNOVER` (60), `INCLUDE_MM` (1 para incluir market makers), `SHARPE` (0 para desactivar), `DATA_DIR`, `HOST`, `PORT`.
 
+## Validación
+
+`python -m whale_tracking.validate` reconstruye las posiciones de las wallets hora a hora desde sus fills y
+mide si el sesgo anticipa retornos (IC de Spearman con p-valor por permutación, acierto, Sharpe, estabilidad
+entre mitades). Resultado del 23-nov-2026 (45 wallets, 90 días, periodo bajista): **el nivel del sesgo no
+predijo retornos**; solo el *cambio* a 24 h muestra un IC positivo en BTC, sin significancia estadística.
+Detalle y salvedades en [`docs/validation-2026-11-23.md`](docs/validation-2026-11-23.md).
+
 ## Limitaciones conocidas
 
 - Solo posiciones de la cuenta principal de cada wallet (no subcuentas ni vaults).
