@@ -13,7 +13,9 @@ from typing import Any
 import websockets
 
 from .aggregate import EXCLUDED_DEFAULT, BiasHistory, build_liq_map, compute_bias, pinned_first
+from .alignment import classify_alignment
 from .classify import classify
+from .journal import Journal
 from .config import Settings
 from .hl_client import InfoClient
 from .ranking import apply_portfolio, select_watchlist
@@ -33,6 +35,7 @@ class Engine:
         self.marks: dict[str, float] = {}
         self.history = BiasHistory()
         self.exclude = frozenset() if cfg.include_mm else EXCLUDED_DEFAULT
+        self.journal = Journal(cfg.data_dir / "journal.json")
         self.events: deque[dict] = deque(maxlen=500)
         self.subscribers: set[asyncio.Queue] = set()
         self.seen = SeenTids()
@@ -71,7 +74,7 @@ class Engine:
             self._load_history()
 
             self._phase("live", "")
-            loops = [self._listener(), self._reconcile_loop(), self._history_loop()]
+            loops = [self._listener(), self._reconcile_loop(), self._history_loop(), self._snapshot_loop()]
             if self.cfg.sharpe_enabled:
                 loops.append(self._sharpe_loop())
             await asyncio.gather(*loops)
@@ -200,6 +203,39 @@ class Engine:
                 last_save = time.time()
             await asyncio.sleep(self.cfg.history_s)
 
+    async def _snapshot_loop(self) -> None:
+        """Cada hora añade a data/snapshots.jsonl el estado de las ballenas por activo (dataset propio)."""
+        await asyncio.sleep(90)  # deja que se estabilicen marks y sesgo tras el arranque
+        while not self._stop.is_set():
+            try:
+                self.cfg.data_dir.mkdir(parents=True, exist_ok=True)
+                ts = time.time()
+                with (self.cfg.data_dir / "snapshots.jsonl").open("a") as f:
+                    for s in self.signals(min_wallets=3):
+                        f.write(json.dumps({
+                            "ts": ts, "coin": s["coin"], "mark": self.marks.get(s["coin"]), "bias": s["bias"],
+                            "confidence": s["confidence"], "n_wallets": s["n_wallets"], "breadth": s["breadth"],
+                            "net_usd": s["net_usd"], "top1_share": s["top1_share"],
+                            "d1h": (s["delta_1h"] or {}).get("bias"), "d4h": (s["delta_4h"] or {}).get("bias"),
+                            "d24h": (s["delta_24h"] or {}).get("bias")}) + "\n")
+            except Exception as e:  # noqa: BLE001  — un fallo del registro no debe tumbar el motor
+                log.warning("snapshot no guardado: %s", e)
+            await asyncio.sleep(3600)
+
+    def alignment(self, coin: str, direction: str) -> dict | None:
+        """¿Va tu entrada a favor del cambio de posicionamiento de las ballenas? + contexto de liquidaciones."""
+        sig = self.signal(coin)
+        if sig is None:
+            return None
+        delta = (sig["delta_24h"] or {}).get("bias")
+        res = classify_alignment(direction, delta, sig["confidence"], sig["n_wallets"])
+        lm = self.liq_map(coin)
+        return {"coin": sig["coin"], "direction": direction, **res, "stale": sig["stale"],
+                "signal": {k: sig[k] for k in ("label", "bias", "confidence", "n_wallets", "concentrated",
+                                                "delta_1h", "delta_4h", "delta_24h")},
+                "liq_within_pct": lm["within_pct"] if lm else None, "mark": self.marks.get(sig["coin"]),
+                "kind": "context"}
+
     def _history_path(self):
         return self.cfg.data_dir / "history.json"
 
@@ -268,7 +304,7 @@ class Engine:
     def signal(self, coin: str, bias: dict[str, dict] | None = None) -> dict | None:
         """Señal compacta y exportable para otras apps. Es CONTEXTO de posicionamiento, no un veredicto."""
         bias = bias or self.bias()
-        b = bias.get(coin.upper())
+        b = bias.get(coin) or bias.get(self._canon(coin, bias))
         if not b:
             return None
         now = time.time()
@@ -285,14 +321,23 @@ class Engine:
             "as_of": now, "stale": self.stale(), "source": "hyperliquid-public", "kind": "context",
         }
 
+    @staticmethod
+    def _canon(coin: str, keys) -> str | None:
+        """Resuelve el nombre del activo sin distinguir mayúsculas (HL tiene kPEPE, kBONK…)."""
+        low = coin.lower()
+        return next((k for k in keys if k.lower() == low), None)
+
     def signals(self, min_wallets: int = 3) -> list[dict]:
         bias = self.bias()
         cs = [c for c in bias if bias[c]["n_wallets"] >= min_wallets]
         cs.sort(key=lambda c: bias[c]["gross_usd"], reverse=True)
-        return [self.signal(c, bias) for c in pinned_first(cs)]
+        return [s for s in (self.signal(c, bias) for c in pinned_first(cs)) if s]
 
     def liq_map(self, coin: str) -> dict | None:
-        return build_liq_map(self.book, self.wallets, self.marks, coin.upper(), exclude_styles=self.exclude)
+        name = coin if coin in self.marks else self._canon(coin, self.marks)
+        if name is None:
+            return None
+        return build_liq_map(self.book, self.wallets, self.marks, name, exclude_styles=self.exclude)
 
     def snapshot(self) -> dict:
         now = time.time()

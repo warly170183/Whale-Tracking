@@ -11,11 +11,24 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, StreamingResponse
+from pydantic import BaseModel
 
 from .config import Settings
 from .engine import Engine
 
 WEB = Path(__file__).resolve().parent.parent / "web"
+
+
+class EntryIn(BaseModel):
+    coin: str
+    direction: str                  # long | short
+    entry_px: float | None = None   # por defecto, el mark actual
+    risk_pct: float | None = None   # distancia al stop en % (para calcular R)
+    note: str = ""
+
+
+class CloseIn(BaseModel):
+    exit_px: float | None = None
 
 
 def create_app(cfg: Settings | None = None) -> FastAPI:
@@ -51,7 +64,8 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
 
     @app.get("/api/history/{coin}")
     def history(coin: str):
-        return [{"t": t, "bias": b} for t, b in engine.history.series(coin.upper(), max_points=300)]
+        name = engine._canon(coin, engine.marks) or coin
+        return [{"t": t, "bias": b} for t, b in engine.history.series(name, max_points=300)]
 
     @app.get("/api/signals")
     def signals(min_wallets: int = Query(3, ge=1, le=50)):
@@ -71,6 +85,45 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
         if m is None:
             raise HTTPException(404, f"sin precio para {coin.upper()}")
         return m
+
+    @app.get("/api/alignment/{coin}")
+    def alignment(coin: str, direction: str = Query(..., pattern="^(long|short)$")):
+        a = engine.alignment(coin, direction)
+        if a is None:
+            raise HTTPException(404, f"sin posiciones de ballenas seguidas en {coin.upper()}")
+        return a
+
+    @app.post("/api/journal")
+    def journal_add(body: EntryIn):
+        if body.direction not in ("long", "short"):
+            raise HTTPException(422, "direction debe ser long o short")
+        a = engine.alignment(body.coin, body.direction)
+        if a is None:
+            raise HTTPException(404, f"sin datos de ballenas para {body.coin.upper()}")
+        name = a["coin"]            # nombre canónico (p. ej. kPEPE)
+        px = body.entry_px or engine.marks.get(name)
+        if not px:
+            raise HTTPException(422, "sin precio: indica entry_px")
+        return engine.journal.add(name, body.direction, px, a, a["signal"], body.risk_pct, body.note)
+
+    @app.post("/api/journal/{entry_id}/close")
+    def journal_close(entry_id: str, body: CloseIn):
+        entry = next((e for e in engine.journal.entries if e["id"] == entry_id), None)
+        px = body.exit_px or (engine.marks.get(entry["coin"]) if entry else None)
+        if not px:
+            raise HTTPException(422, "sin precio: indica exit_px")
+        e = engine.journal.close(entry_id, px)
+        if e is None:
+            raise HTTPException(404, "entrada no encontrada o ya cerrada")
+        return e
+
+    @app.get("/api/journal")
+    def journal_list():
+        return list(reversed(engine.journal.entries))
+
+    @app.get("/api/journal/stats")
+    def journal_stats():
+        return engine.journal.stats()
 
     @app.get("/api/stream")
     async def stream():

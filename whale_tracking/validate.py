@@ -178,6 +178,7 @@ def basket_series(paths_by_wallet: dict[str, tuple[int, dict]], coin: str,
         longs = shorts = 0
         lu = su = 0.0
         live = 0
+        biggest = 0.0
         for start, paths in paths_by_wallet.values():
             if start > h:
                 continue
@@ -189,14 +190,16 @@ def basket_series(paths_by_wallet: dict[str, tuple[int, dict]], coin: str,
             if pos > 0:
                 longs += 1
                 lu += pos * px
+                biggest = max(biggest, pos * px)
             elif pos < 0:
                 shorts += 1
                 su += -pos * px
+                biggest = max(biggest, -pos * px)
         n = longs + shorts
         if live < min_wallets or n < 3:
             continue
         out[h] = {"bias": (lu - su) / (lu + su), "breadth": (longs - shorts) / n,
-                  "n": n, "live": live, "net_usd": lu - su}
+                  "n": n, "live": live, "net_usd": lu - su, "top1": biggest / (lu + su)}
     return out
 
 
@@ -235,6 +238,29 @@ def evaluate(series: dict[int, dict], prices: dict[int, float], H: int, key: str
             "mean_follow_pct": 100 * statistics.mean(follow), "mean_hold_pct": 100 * statistics.mean(fwd)}
 
 
+def load_basket(api: Api, cfg: Settings, n_wallets: int, days: int, now_h: int, since: int
+                ) -> tuple[dict[str, tuple[int, dict]], int, list[int]]:
+    """Selecciona wallets como la app y reconstruye sus posiciones. Devuelve (paths, primera hora, horas)."""
+    print("leaderboard…", file=sys.stderr)
+    rows = httpx.get(cfg.leaderboard_url, timeout=90).json()
+    rows = rows.get("leaderboardRows", rows) if isinstance(rows, dict) else rows
+    chosen = select_watchlist(rows, Settings(watch_size=n_wallets * 2, min_account=cfg.min_account,
+                                             min_month_vlm=cfg.min_month_vlm))
+    paths_by_wallet: dict[str, tuple[int, dict]] = {}
+    for i, w in enumerate(chosen):
+        if len(paths_by_wallet) >= n_wallets:
+            break
+        fills = api.fills(w.address, since)
+        perp = [f for f in fills if is_perp(f)]
+        print(f"  [{i + 1}/{len(chosen)}] {w.address[:10]} fills perp: {len(perp)}", file=sys.stderr)
+        if len(perp) < 50:
+            continue
+        paths_by_wallet[w.address] = (min(f["time"] for f in perp), position_paths(perp))
+    print(f"wallets usadas: {len(paths_by_wallet)}", file=sys.stderr)
+    first = max(min(s for s, _ in paths_by_wallet.values()) // HOUR_MS * HOUR_MS, since)
+    return paths_by_wallet, first, list(range(first, now_h + 1, HOUR_MS))
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--wallets", type=int, default=45)
@@ -250,26 +276,7 @@ def main() -> None:
     now_h = int(time.time() * 1000) // HOUR_MS * HOUR_MS
     since = now_h - args.days * DAY_MS
 
-    print("leaderboard…", file=sys.stderr)
-    rows = httpx.get(cfg.leaderboard_url, timeout=90).json()
-    rows = rows.get("leaderboardRows", rows) if isinstance(rows, dict) else rows
-    chosen = select_watchlist(rows, Settings(watch_size=args.wallets * 2, min_account=cfg.min_account,
-                                             min_month_vlm=cfg.min_month_vlm))
-    paths_by_wallet: dict[str, tuple[int, dict]] = {}
-    for i, w in enumerate(chosen):
-        if len(paths_by_wallet) >= args.wallets:
-            break
-        fills = api.fills(w.address, since)
-        perp = [f for f in fills if is_perp(f)]
-        print(f"  [{i + 1}/{len(chosen)}] {w.address[:10]} fills perp: {len(perp)}", file=sys.stderr)
-        if len(perp) < 50:
-            continue
-        paths_by_wallet[w.address] = (min(f["time"] for f in perp), position_paths(perp))
-    print(f"wallets usadas: {len(paths_by_wallet)}", file=sys.stderr)
-
-    first = min(s for s, _ in paths_by_wallet.values()) // HOUR_MS * HOUR_MS
-    first = max(first, since)
-    hours = list(range(first, now_h + 1, HOUR_MS))
+    paths_by_wallet, first, hours = load_basket(api, cfg, args.wallets, args.days, now_h, since)
     report: dict = {"generated": time.time(), "wallets": len(paths_by_wallet), "days": args.days,
                     "from": first, "to": now_h, "results": []}
     for coin in args.coins:

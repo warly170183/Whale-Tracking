@@ -47,6 +47,12 @@
   .lq .l{background:var(--long);height:9px} .lq .s{background:var(--short);height:9px}
   .sty{font-size:11px;color:var(--mut)} .sty.market_maker{color:#e3a64a}
   label.tg{font-size:12px;color:var(--mut);display:inline-flex;gap:6px;align-items:center;margin-left:8px;text-transform:none;letter-spacing:0}
+  .vrow{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px}
+  select,input.n,button{background:var(--bg);color:var(--tx);border:1px solid var(--line);border-radius:8px;padding:7px 10px;font:inherit}
+  input.n{width:90px} button{cursor:pointer} button.l{border-color:var(--long);color:var(--long)} button.s{border-color:var(--short);color:var(--short)}
+  button.reg{border-color:var(--acc);color:var(--acc)}
+  .al{font-weight:700;padding:3px 10px;border-radius:99px;border:1px solid;display:inline-block}
+  .al.aligned{color:var(--long);border-color:var(--long)} .al.against{color:var(--short);border-color:var(--short)} .al.neutral{color:var(--neu);border-color:var(--neu)}
   footer{color:var(--mut);font-size:12px;padding:20px 16px;max-width:1200px;margin:0 auto}
   a{color:var(--acc)}
 </style>
@@ -63,6 +69,17 @@
   <div class="grid" id="coins"><div class="empty">Cargando posiciones de las ballenas…</div></div>
 
   <div id="liq" class="card" style="display:none"></div>
+
+  <h2>Validar entrada</h2>
+  <div class="card">
+    <div class="vrow"><select id="vcoin"></select>
+      <button class="l" onclick="checkAlign('long')">▲ Long</button><button class="s" onclick="checkAlign('short')">▼ Short</button>
+      <input class="n" id="vrisk" type="number" step="0.1" placeholder="stop %"></div>
+    <div id="vres" class="meta">Elige activo y dirección. Mide si tu entrada va a favor del <b>cambio</b> de posicionamiento de las ballenas (24 h). Evidencia previa (90 d): «en contra» rindió peor (úsalo como veto); «alineada» no mejoró nada. Contexto, no señal.</div>
+  </div>
+
+  <h2>Diario de entradas <span class="meta" id="jstat" style="text-transform:none;letter-spacing:0"></span></h2>
+  <div class="scroll"><table id="journal"><thead><tr><th>Entrada</th><th>Alineación</th><th>Precio</th><th>Resultado</th><th></th></tr></thead><tbody></tbody></table></div>
 
   <h2>Eventos en vivo (≥ umbral)</h2>
   <div class="feed" id="feed"><div class="empty">Esperando movimientos…</div></div>
@@ -92,6 +109,8 @@ const hhmm = t => new Date(t*1000).toLocaleTimeString('es-ES',{hour:'2-digit',mi
 
 function renderCoins(st){
   const el = $('#coins');
+  const sel=$('#vcoin'), names=st.coins.filter(c=>c.n_wallets>=3).map(c=>c.coin);
+  if(sel.options.length!==names.length){ const cur=sel.value; sel.innerHTML=names.map(n=>`<option>${n}</option>`).join(''); if(names.includes(cur)) sel.value=cur; }
   const cs = st.coins.filter(c => c.n_long + c.n_short >= 2 || ['BTC','ETH'].includes(c.coin)).slice(0,18);
   if(!cs.length){ el.innerHTML = '<div class="empty">Sin posiciones todavía…</div>'; return; }
   el.innerHTML = cs.map(c => {
@@ -156,9 +175,39 @@ async function showLiq(coin){
     ${rows}<div style="margin-top:10px"><div class="meta"><b>Más cercanas al mark</b></div>${near||'<div class="meta">—</div>'}</div>`;
   tick();
 }
+const ALN={aligned:'ALINEADA',against:'EN CONTRA',neutral:'NEUTRAL'};
+let lastAl=null;
+async function checkAlign(dir){
+  const coin=$('#vcoin').value, el=$('#vres'); if(!coin) return;
+  const r=await fetch(`/api/alignment/${coin}?direction=${dir}`);
+  if(!r.ok){ el.textContent='Sin posiciones de ballenas seguidas en '+coin; lastAl=null; return; }
+  const a=await r.json(); lastAl=a;
+  const w=a.liq_within_pct||{}, fuel=dir==='long'?'short_usd':'long_usd', risk=dir==='long'?'long_usd':'short_usd';
+  const lq=['2','5','10'].filter(k=>w[k]).map(k=>`±${k}%: combustible ${fmt(w[k][fuel])} · riesgo ${fmt(w[k][risk])}`).join(' | ');
+  el.innerHTML=`<div><span class="al ${a.label}">${ALN[a.label]}</span> <b>${a.coin} ${dir==='long'?'▲ long':'▼ short'}</b> ${a.stale?'<span class="chip warn">datos desactualizados</span>':''}</div>
+   <div style="margin-top:6px">${a.reasons.join('. ')}.</div>
+   <div class="meta" style="margin-top:6px"><span>Sesgo ${(a.signal.bias*100).toFixed(0)} (${a.signal.label})</span><span>conf ${(a.signal.confidence*100).toFixed(0)}%</span><span>${a.signal.n_wallets} wallets</span>${dlt(a.signal.delta_24h,'24h')}</div>
+   <div class="meta" style="margin-top:4px">Liquidaciones cercanas — ${lq||'—'}</div>
+   <div style="margin-top:8px"><button class="reg" onclick="regEntry('${dir}')">Registrar esta entrada</button> <span class="meta">se guarda con la alineación de este momento</span></div>`;
+}
+async function regEntry(dir){
+  const risk=parseFloat($('#vrisk').value)||null;
+  const r=await fetch('/api/journal',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({coin:$('#vcoin').value,direction:dir,risk_pct:risk})});
+  if(r.ok){ loadJournal(); $('#vres').insertAdjacentHTML('beforeend','<div class="meta pos" style="margin-top:6px">Entrada registrada ✓</div>'); }
+}
+async function closeEntry(id){ await fetch(`/api/journal/${id}/close`,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}); loadJournal(); }
+async function loadJournal(){
+  const [list,st]=await Promise.all([fetch('/api/journal').then(r=>r.json()),fetch('/api/journal/stats').then(r=>r.json())]);
+  $('#journal tbody').innerHTML=list.slice(0,15).map(e=>`<tr><td>${e.coin} ${e.direction==='long'?'▲':'▼'} <span class="meta">${new Date(e.ts*1000).toLocaleString('es-ES',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}</span></td>
+    <td><span class="al ${e.alignment}">${ALN[e.alignment]}</span></td><td>${px(e.entry_px)}${e.exit_px?' → '+px(e.exit_px):''}</td>
+    <td class="${cls(e.ret_pct||0)}">${e.status==='closed'?e.ret_pct.toFixed(2)+'%'+(e.r!=null?` · ${e.r.toFixed(2)}R`:''):'abierta'}</td>
+    <td>${e.status==='open'?`<button onclick="closeEntry('${e.id}')">Cerrar a mark</button>`:''}</td></tr>`).join('')||'<tr><td colspan="5" class="empty">Sin entradas registradas</td></tr>';
+  const g=st.groups, f=x=>x.n?`${x.n} (${x.mean_ret_pct.toFixed(2)}%, ${(x.win_rate*100).toFixed(0)}% acierto)`:'0';
+  $('#jstat').textContent=`· cerradas: alineadas ${f(g.aligned)} · neutral ${f(g.neutral)} · en contra ${f(g.against)}`+(typeof st.test==='object'?` · p=${st.test.p_one_sided.toFixed(3)}`:'');
+}
 $('#hidemm').addEventListener('change', loadWallets);
 (async () => {
-  await tick(); loadWallets();
+  await tick(); loadWallets(); loadJournal();
   setFeed(await (await fetch('/api/events?limit=100')).json());
   setInterval(tick, 5000); setInterval(loadWallets, 30000);
   const es = new EventSource('/api/stream');

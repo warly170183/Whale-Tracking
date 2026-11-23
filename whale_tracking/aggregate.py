@@ -105,6 +105,7 @@ def build_liq_map(book: Book, wallets: dict[str, WalletInfo], marks: dict[str, f
                for i in range(bins)]
     tot_long = tot_short = out_long = out_short = 0.0
     near: list[dict] = []
+    within = {pct: {"long_usd": 0.0, "short_usd": 0.0} for pct in (2, 5, 10)}
     for (addr, c), pos in book.positions.items():
         if c != coin or not pos.liq_px:
             continue
@@ -116,6 +117,9 @@ def build_liq_map(book: Book, wallets: dict[str, WalletInfo], marks: dict[str, f
         if (is_long and pos.liq_px >= mark) or (not is_long and pos.liq_px <= mark):
             continue
         dist = abs(pos.liq_px - mark) / mark
+        for pct, acc_ in within.items():
+            if dist * 100 <= pct:
+                acc_["long_usd" if is_long else "short_usd"] += notional
         near.append({"address": addr, "side": pos.side, "notional": notional, "liq_px": pos.liq_px,
                      "dist_pct": dist * 100, "lev": pos.leverage})
         if is_long:
@@ -133,7 +137,7 @@ def build_liq_map(book: Book, wallets: dict[str, WalletInfo], marks: dict[str, f
     near.sort(key=lambda x: x["dist_pct"])
     return {"coin": coin, "mark": mark, "bins": buckets, "total_long_liq": tot_long,
             "total_short_liq": tot_short, "outside_long": out_long, "outside_short": out_short,
-            "nearest": near[:6]}
+            "within_pct": {str(k): v for k, v in within.items()}, "nearest": near[:6]}
 
 
 class BiasHistory:

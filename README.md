@@ -53,6 +53,19 @@ pytest                            # tests
 `COINS` (vacío = todos), `RECONCILE_S` (300), `EVENT_MIN_USD` (100000), `BIAS_THRESHOLD` (0.25),
 `MM_TURNOVER` (60), `INCLUDE_MM` (1 para incluir market makers), `SHARPE` (0 para desactivar), `DATA_DIR`, `HOST`, `PORT`.
 
+## Validar una entrada (alineación) y diario
+
+`GET /api/alignment/{coin}?direction=long|short` responde si tu entrada va **a favor, en contra o neutral**
+respecto al *cambio* del sesgo a 24 h (reglas fijas en `alignment.py`: |Δ| ≥ 5 pp, confianza ≥ 65 %, ≥ 5 wallets),
+más el contexto de liquidaciones cercanas (±2/5/10 %). En el panel: sección «Validar entrada».
+
+- **Diario** (`POST /api/journal`, `/api/journal/{id}/close`, `GET /api/journal/stats`): registra cada entrada con la
+  alineación de ese instante y compara resultados por grupo con un test de permutación cuando hay ≥ 10 cerradas por lado.
+- **Registro horario** en `data/snapshots.jsonl`: estado de las ballenas por activo, para construir un dataset propio.
+- **Backtest condicional** (`python -m whale_tracking.conditional`): resultado del 23-nov-2026 en
+  [`docs/conditional-2026-11-23.md`](docs/conditional-2026-11-23.md): *alineada* no mejora las entradas a favor de
+  tendencia, pero *en contra* rindió claramente peor (hipótesis razonable, aún sin confirmar). Úsalo como **veto**, no como confirmación.
+
 ## Validación
 
 `python -m whale_tracking.validate` reconstruye las posiciones de las wallets hora a hora desde sus fills y
