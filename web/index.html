@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Whale Tracking</title>
+<style>
+  :root{--bg:#0d1117;--card:#161b22;--line:#262d36;--tx:#e6edf3;--mut:#8b949e;--long:#2ea66f;--short:#e5534b;--neu:#8b949e;--acc:#58a6ff}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--tx);font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+  header{display:flex;flex-wrap:wrap;gap:8px 16px;align-items:center;padding:12px 16px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--bg);z-index:5}
+  h1{font-size:16px;margin:0}
+  .pill{font-size:12px;color:var(--mut);display:flex;align-items:center;gap:6px}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--neu)}
+  .dot.on{background:var(--long)} .dot.err{background:var(--short)}
+  main{padding:12px 16px;max-width:1200px;margin:0 auto}
+  h2{font-size:13px;color:var(--mut);text-transform:uppercase;letter-spacing:.05em;margin:20px 0 8px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:10px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px}
+  .row{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
+  .coin{font-weight:700;font-size:16px}
+  .tag{font-size:11px;font-weight:700;padding:2px 8px;border-radius:99px;border:1px solid}
+  .tag.LARGO{color:var(--long);border-color:var(--long)} .tag.CORTO{color:var(--short);border-color:var(--short)} .tag.NEUTRAL{color:var(--neu);border-color:var(--neu)}
+  .bar{display:flex;height:8px;border-radius:4px;overflow:hidden;background:var(--line);margin:10px 0 6px}
+  .bar i{display:block;height:100%} .bar .l{background:var(--long)} .bar .s{background:var(--short)}
+  .meta{display:flex;flex-wrap:wrap;gap:4px 12px;color:var(--mut);font-size:12px}
+  .pos{color:var(--long)} .neg{color:var(--short)}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{text-align:right;padding:6px 8px;border-bottom:1px solid var(--line);white-space:nowrap}
+  th:first-child,td:first-child{text-align:left} th{color:var(--mut);font-weight:500;font-size:12px}
+  .scroll{overflow-x:auto;background:var(--card);border:1px solid var(--line);border-radius:10px}
+  .feed{background:var(--card);border:1px solid var(--line);border-radius:10px;max-height:340px;overflow-y:auto}
+  .ev{display:flex;gap:10px;padding:7px 12px;border-bottom:1px solid var(--line);font-size:13px;align-items:baseline;flex-wrap:wrap}
+  .ev:last-child{border:0} .ev .t{color:var(--mut);font-size:12px;min-width:58px}
+  .badge{font-size:11px;font-weight:700;text-transform:uppercase}
+  .empty{color:var(--mut);padding:16px;text-align:center}
+  footer{color:var(--mut);font-size:12px;padding:20px 16px;max-width:1200px;margin:0 auto}
+  a{color:var(--acc)}
+</style>
+</head>
+<body>
+<header>
+  <h1>🐋 Whale Tracking</h1>
+  <span class="pill"><span class="dot" id="dot"></span><span id="status">conectando…</span></span>
+  <span class="pill" id="counts"></span>
+</header>
+<main>
+  <h2>Sesgo de la cesta por activo</h2>
+  <div class="grid" id="coins"><div class="empty">Cargando posiciones de las ballenas…</div></div>
+
+  <h2>Eventos en vivo (≥ umbral)</h2>
+  <div class="feed" id="feed"><div class="empty">Esperando movimientos…</div></div>
+
+  <h2>Ballenas seguidas</h2>
+  <div class="scroll"><table id="wallets"><thead><tr>
+    <th>Wallet</th><th>Cuenta</th><th>Sharpe 30d</th><th>Peso</th><th>Pos.</th><th>Bruto</th><th>Neto</th><th>Mayor</th>
+  </tr></thead><tbody></tbody></table></div>
+</main>
+<footer>
+  Contexto, no señal: el sesgo describe dónde están posicionadas las wallets seguidas, no lo que harán.
+  Úsalo como un filtro más junto a tu estructura, régimen y derivados. Datos: API pública de Hyperliquid.
+</footer>
+<script>
+const $ = s => document.querySelector(s);
+const fmt = n => { if(n==null) return '—'; const a=Math.abs(n), s=n<0?'-':'';
+  return a>=1e9? s+'$'+(a/1e9).toFixed(2)+'B' : a>=1e6? s+'$'+(a/1e6).toFixed(2)+'M' : a>=1e3? s+'$'+(a/1e3).toFixed(0)+'K' : s+'$'+a.toFixed(0); };
+const short = a => a.slice(0,6)+'…'+a.slice(-4);
+const px = n => n==null?'—': n>=100? n.toFixed(1) : n>=1? n.toFixed(3) : n.toPrecision(3);
+const cls = n => n>0?'pos':n<0?'neg':'';
+const dlt = (d,k) => d? `<span class="${cls(d.bias)}">${k} ${d.bias>0?'+':''}${(d.bias*100).toFixed(0)}pp</span>` : `<span>${k} —</span>`;
+const hhmm = t => new Date(t*1000).toLocaleTimeString('es-ES',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+
+function renderCoins(st){
+  const el = $('#coins');
+  const cs = st.coins.filter(c => c.n_long + c.n_short >= 2 || ['BTC','ETH'].includes(c.coin)).slice(0,18);
+  if(!cs.length){ el.innerHTML = '<div class="empty">Sin posiciones todavía…</div>'; return; }
+  el.innerHTML = cs.map(c => {
+    const g = c.gross_usd || 1, lp = (c.long_usd/g*100).toFixed(1);
+    return `<div class="card">
+      <div class="row"><span class="coin">${c.coin}</span><span class="tag ${c.label}">${c.label} ${(c.bias*100).toFixed(0)}</span></div>
+      <div class="bar"><i class="l" style="width:${lp}%"></i><i class="s" style="width:${100-lp}%"></i></div>
+      <div class="row"><span class="pos">L ${fmt(c.long_usd)} · ${c.n_long}</span><span class="neg">${c.n_short} · ${fmt(c.short_usd)} S</span></div>
+      <div class="meta" style="margin-top:6px"><span>Neto <b class="${cls(c.net_usd)}">${fmt(c.net_usd)}</b></span><span>Amplitud ${(c.breadth*100).toFixed(0)}%</span><span>Mark ${px(c.mark)}</span></div>
+      <div class="meta" style="margin-top:4px">${dlt(c.delta_1h,'1h')}${dlt(c.delta_4h,'4h')}${dlt(c.delta_24h,'24h')}</div>
+    </div>`; }).join('');
+}
+
+function renderStatus(st){
+  const s = st.status, dot = $('#dot');
+  dot.className = 'dot' + (s.phase==='live' && s.ws_connected ? ' on' : s.phase==='error' ? ' err' : '');
+  const txt = {ranking:'descargando leaderboard…',seeding:'cargando posiciones…',live:s.ws_connected?'en vivo':'reconectando…',error:'error: '+s.detail,init:'iniciando…'}[s.phase] || s.phase;
+  $('#status').textContent = txt;
+  $('#counts').textContent = `${st.wallets_tracked} wallets · ${st.open_positions} posiciones · Sharpe ${s.sharpe_done}/${st.wallets_tracked}`;
+}
+
+function evHTML(e){
+  const col = e.type==='close'||e.type==='reduce' ? 'var(--mut)' : (e.side==='long'?'var(--long)':'var(--short)');
+  const pnl = e.realized_pnl!=null ? ` · PnL <span class="${cls(e.realized_pnl)}">${fmt(e.realized_pnl)}</span>` : '';
+  return `<div class="ev"><span class="t">${hhmm(e.ts)}</span><span class="badge" style="color:${col}">${e.type} ${e.side}</span>
+    <b>${e.coin}</b><span>${fmt(e.notional)} @ ${px(e.px)}</span><span class="meta">${short(e.address)}${pnl}</span></div>`;
+}
+function setFeed(list){ $('#feed').innerHTML = list.length ? list.map(evHTML).join('') : '<div class="empty">Esperando movimientos…</div>'; }
+
+async function loadWallets(){
+  const rows = await (await fetch('/api/wallets')).json();
+  $('#wallets tbody').innerHTML = rows.slice(0,60).map(w => `<tr>
+    <td title="${w.address}">${short(w.address)}${w.custom?' ★':''}</td><td>${fmt(w.account_value)}</td>
+    <td>${w.sharpe_30d==null?'—':w.sharpe_30d.toFixed(2)}</td><td>${w.score.toFixed(2)}</td>
+    <td>${w.n_positions}</td><td>${fmt(w.gross_usd)}</td><td class="${cls(w.net_usd)}">${fmt(w.net_usd)}</td>
+    <td>${w.top_coin? w.top_coin+' '+(w.top_side==='long'?'L':'S') : '—'}</td></tr>`).join('');
+}
+async function tick(){
+  try{ const st = await (await fetch('/api/state')).json(); renderStatus(st); renderCoins(st); }
+  catch(e){ $('#status').textContent='sin conexión con el servidor'; $('#dot').className='dot err'; }
+}
+(async () => {
+  await tick(); loadWallets();
+  setFeed(await (await fetch('/api/events?limit=100')).json());
+  setInterval(tick, 5000); setInterval(loadWallets, 30000);
+  const es = new EventSource('/api/stream');
+  es.onmessage = m => { const f = $('#feed'); if(f.querySelector('.empty')) f.innerHTML='';
+    f.insertAdjacentHTML('afterbegin', evHTML(JSON.parse(m.data)));
+    while(f.children.length>150) f.lastChild.remove(); };
+})();
+</script>
+</body>
+</html>
