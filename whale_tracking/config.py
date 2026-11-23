@@ -39,6 +39,8 @@ class Settings:
     # Señales
     event_min_usd: float = 100_000    # eventos menores no salen en el feed
     bias_threshold: float = 0.25      # |sesgo| >= umbral => LARGO/CORTO
+    mm_turnover: float = 60.0         # volumen 30d / cuenta >= X => market maker (excluido del sesgo)
+    include_mm: bool = False          # True = los market makers también cuentan en el sesgo
 
     data_dir: Path = Path("data")
 
@@ -55,5 +57,7 @@ class Settings:
             sharpe_enabled=_env("SHARPE", "1") != "0",
             event_min_usd=float(_env("EVENT_MIN_USD", "100000")),
             bias_threshold=float(_env("BIAS_THRESHOLD", "0.25")),
+            mm_turnover=float(_env("MM_TURNOVER", "60")),
+            include_mm=_env("INCLUDE_MM", "0") == "1",
             data_dir=Path(_env("DATA_DIR", "data")),
         )

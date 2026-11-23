@@ -5,10 +5,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, StreamingResponse
 
 from .config import Settings
@@ -29,7 +30,7 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
         yield
         await engine.stop()
 
-    app = FastAPI(title="Whale Tracking", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="Whale Tracking", version="0.2.0", lifespan=lifespan)
     app.state.engine = engine
 
     @app.get("/api/health")
@@ -50,7 +51,26 @@ def create_app(cfg: Settings | None = None) -> FastAPI:
 
     @app.get("/api/history/{coin}")
     def history(coin: str):
-        return [{"t": t, "bias": b} for t, b in engine.history.series(coin.upper())]
+        return [{"t": t, "bias": b} for t, b in engine.history.series(coin.upper(), max_points=300)]
+
+    @app.get("/api/signals")
+    def signals(min_wallets: int = Query(3, ge=1, le=50)):
+        """Señales de contexto por activo, listas para consumir desde otras apps."""
+        return {"as_of": time.time(), "stale": engine.stale(), "signals": engine.signals(min_wallets)}
+
+    @app.get("/api/signal/{coin}")
+    def signal(coin: str):
+        s = engine.signal(coin)
+        if s is None:
+            raise HTTPException(404, f"sin posiciones de ballenas seguidas en {coin.upper()}")
+        return s
+
+    @app.get("/api/liqmap/{coin}")
+    def liqmap(coin: str):
+        m = engine.liq_map(coin)
+        if m is None:
+            raise HTTPException(404, f"sin precio para {coin.upper()}")
+        return m
 
     @app.get("/api/stream")
     async def stream():

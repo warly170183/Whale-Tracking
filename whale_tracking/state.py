@@ -92,7 +92,8 @@ def apply_fill(
 @dataclass
 class WalletInfo:
     address: str
-    account_value: float = 0.0
+    account_value: float = 0.0       # equity perp (clearinghouseState), se refresca al sembrar
+    lb_account: float = 0.0          # valor de cuenta del leaderboard (incluye más que el perp)
     month_pnl: float = 0.0
     alltime_pnl: float = 0.0
     month_vlm: float = 0.0
@@ -102,6 +103,7 @@ class WalletInfo:
     score: float = 0.5              # peso de la wallet en el sesgo agregado (0.2–1.0)
     custom: bool = False
     seeded: bool = False
+    style: str = "unknown"          # market_maker | directional | hedged | flat | unknown
 
 
 class Book:

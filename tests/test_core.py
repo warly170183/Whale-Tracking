@@ -123,3 +123,85 @@ def test_select_watchlist_filters_and_orders():
     cfg = Settings(watch_size=10, extra_wallets=("0xcustom",))
     wl = select_watchlist(rows, cfg)
     assert [w.address for w in wl] == ["0x2", "0x1", "0xcustom"] and wl[-1].custom
+
+
+# ── v0.2: estilos, concentración, mapa de liquidaciones, histórico ─────────────
+
+from whale_tracking.aggregate import build_liq_map
+from whale_tracking.classify import classify
+
+
+def test_classify_styles():
+    w = WalletInfo(A, account_value=1e6, month_vlm=1e9)             # 1000x
+    assert classify(w, [], {}) == "market_maker"
+    w = WalletInfo(A, account_value=1e6, month_vlm=5e6)
+    assert classify(w, [], {}) == "flat"
+    assert classify(w, [Position(A, "BTC", 1, 100, 0)], {"BTC": 100}) == "directional"
+    hedged = [Position(A, "BTC", 1, 100, 0), Position(A, "ETH", -1, 100, 0)]
+    assert classify(w, hedged, {"BTC": 100, "ETH": 100}) == "hedged"
+
+
+def test_market_makers_excluded_from_bias():
+    b = Book()
+    b.positions[(A, "BTC")] = Position(A, "BTC", 10, 100, 0)
+    b.positions[(B, "BTC")] = Position(B, "BTC", -1, 100, 0)
+    wallets = {A: WalletInfo(A, style="market_maker"), B: WalletInfo(B, style="directional")}
+    out = compute_bias(b, wallets, {"BTC": 100.0})["BTC"]
+    assert out["n_excluded"] == 1 and out["n_wallets"] == 1 and out["label"] == "CORTO"
+    out_all = compute_bias(b, wallets, {"BTC": 100.0}, exclude_styles=frozenset())["BTC"]
+    assert out_all["n_wallets"] == 2 and out_all["label"] == "LARGO"
+
+
+def test_concentration_and_confidence():
+    b = Book()
+    wallets = {}
+    for i in range(6):
+        a = f"0x{i}"
+        b.positions[(a, "BTC")] = Position(a, "BTC", 1 if i else 50, 100, 0)
+        wallets[a] = WalletInfo(a, score=1.0)
+    out = compute_bias(b, wallets, {"BTC": 100.0})["BTC"]
+    assert out["concentrated"] and out["top1_share"] > 0.5
+    assert 0 <= out["confidence"] <= 1
+    # repartido entre más wallets => más confianza
+    b2 = Book()
+    w2 = {}
+    for i in range(8):
+        a = f"0x{i}"
+        b2.positions[(a, "BTC")] = Position(a, "BTC", 5, 100, 0)
+        w2[a] = WalletInfo(a, score=1.0)
+    out2 = compute_bias(b2, w2, {"BTC": 100.0})["BTC"]
+    assert not out2["concentrated"] and out2["confidence"] > out["confidence"]
+
+
+def test_liq_map_sides_and_stale():
+    b = Book()
+    b.positions[(A, "BTC")] = Position(A, "BTC", 2, 100, 0, liq_px=80)       # largo: liq abajo
+    b.positions[(B, "BTC")] = Position(B, "BTC", -1, 100, 0, liq_px=120)     # corto: liq arriba
+    b.positions[("0xc", "BTC")] = Position("0xc", "BTC", 1, 100, 0, liq_px=150)  # largo con liq arriba: obsoleto
+    b.positions[("0xd", "BTC")] = Position("0xd", "BTC", 3, 100, 0, liq_px=10)   # fuera de ±30 %
+    wallets = {a: WalletInfo(a) for a in (A, B, "0xc", "0xd")}
+    m = build_liq_map(b, wallets, {"BTC": 100.0}, "BTC")
+    assert m["total_long_liq"] == 200 + 300 and m["total_short_liq"] == 100
+    assert m["outside_long"] == 300
+    assert sum(x["long_usd"] for x in m["bins"]) == 200 and sum(x["short_usd"] for x in m["bins"]) == 100
+    assert m["nearest"][0]["dist_pct"] == 20.0
+    assert build_liq_map(b, wallets, {}, "BTC") is None
+
+
+def test_history_persistence_and_series():
+    h = BiasHistory()
+    for i in range(10):
+        h.add(i * 60, {"BTC": {"bias": i / 10, "net_usd": i}})
+    h2 = BiasHistory()
+    h2.load(h.dump(), min_ts=60 * 3)
+    assert len(h2.series("BTC")) == 7
+    assert len(h.series("BTC", max_points=4)) == 5 and h.series("BTC", max_points=4)[-1][1] == 0.9
+
+
+def test_select_watchlist_skips_market_makers():
+    def row(a, acct, vlm):
+        return {"ethAddress": a, "accountValue": str(acct), "windowPerformances": [
+            ["month", {"pnl": "1", "roi": "0", "vlm": str(vlm)}], ["allTime", {"pnl": "9", "roi": "0", "vlm": "0"}]]}
+    rows = [row("0xmm", 1e7, 1e10), row("0xdir", 5e6, 5e7)]       # 1000x vs 10x
+    assert [w.address for w in select_watchlist(rows, Settings())] == ["0xdir"]
+    assert len(select_watchlist(rows, Settings(include_mm=True))) == 2

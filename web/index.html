@@ -34,6 +34,19 @@
   .ev:last-child{border:0} .ev .t{color:var(--mut);font-size:12px;min-width:58px}
   .badge{font-size:11px;font-weight:700;text-transform:uppercase}
   .empty{color:var(--mut);padding:16px;text-align:center}
+  .card{cursor:pointer} .card.sel{border-color:var(--acc)}
+  .chips{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}
+  .chip{font-size:11px;padding:1px 7px;border-radius:99px;background:var(--line);color:var(--mut)}
+  .chip.warn{background:#3a2a10;color:#e3a64a} .chip.ok{background:#12301f;color:var(--long)}
+  .spark{display:block;width:100%;height:30px;margin-top:8px}
+  .banner{background:#3a2a10;color:#e3a64a;padding:8px 16px;font-size:13px;display:none}
+  #liq{margin-top:10px}
+  .lq{display:grid;grid-template-columns:64px 1fr;gap:6px;align-items:center;font-size:11px;color:var(--mut);height:12px;margin:1px 0}
+  .lq .b{display:flex;height:9px;align-items:center}
+  .lq.mark{color:var(--acc);font-weight:700;height:16px}
+  .lq .l{background:var(--long);height:9px} .lq .s{background:var(--short);height:9px}
+  .sty{font-size:11px;color:var(--mut)} .sty.market_maker{color:#e3a64a}
+  label.tg{font-size:12px;color:var(--mut);display:inline-flex;gap:6px;align-items:center;margin-left:8px;text-transform:none;letter-spacing:0}
   footer{color:var(--mut);font-size:12px;padding:20px 16px;max-width:1200px;margin:0 auto}
   a{color:var(--acc)}
 </style>
@@ -44,16 +57,19 @@
   <span class="pill"><span class="dot" id="dot"></span><span id="status">conectando…</span></span>
   <span class="pill" id="counts"></span>
 </header>
+<div class="banner" id="banner">Datos desactualizados: el WebSocket no recibe trades. Se resincroniza solo.</div>
 <main>
   <h2>Sesgo de la cesta por activo</h2>
   <div class="grid" id="coins"><div class="empty">Cargando posiciones de las ballenas…</div></div>
 
+  <div id="liq" class="card" style="display:none"></div>
+
   <h2>Eventos en vivo (≥ umbral)</h2>
   <div class="feed" id="feed"><div class="empty">Esperando movimientos…</div></div>
 
-  <h2>Ballenas seguidas</h2>
+  <h2>Ballenas seguidas <label class="tg"><input type="checkbox" id="hidemm" checked> ocultar market makers</label></h2>
   <div class="scroll"><table id="wallets"><thead><tr>
-    <th>Wallet</th><th>Cuenta</th><th>Sharpe 30d</th><th>Peso</th><th>Pos.</th><th>Bruto</th><th>Neto</th><th>Mayor</th>
+    <th>Wallet</th><th>Estilo</th><th>Cuenta</th><th>Sharpe 30d</th><th>Peso</th><th>Pos.</th><th>Bruto</th><th>Neto</th><th>Mayor</th>
   </tr></thead><tbody></tbody></table></div>
 </main>
 <footer>
@@ -68,6 +84,10 @@ const short = a => a.slice(0,6)+'…'+a.slice(-4);
 const px = n => n==null?'—': n>=100? n.toFixed(1) : n>=1? n.toFixed(3) : n.toPrecision(3);
 const cls = n => n>0?'pos':n<0?'neg':'';
 const dlt = (d,k) => d? `<span class="${cls(d.bias)}">${k} ${d.bias>0?'+':''}${(d.bias*100).toFixed(0)}pp</span>` : `<span>${k} —</span>`;
+const spark = v => { if(!v||v.length<2) return '';
+  const w=100,h=30,pts=v.map((y,i)=>`${(i/(v.length-1)*w).toFixed(1)},${(h/2-y*h/2*0.9).toFixed(1)}`).join(' ');
+  const last=v[v.length-1]; return `<svg class="spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none"><line x1="0" y1="${h/2}" x2="${w}" y2="${h/2}" stroke="#262d36" stroke-width=".6"/><polyline fill="none" stroke="${last>=0?'#2ea66f':'#e5534b'}" stroke-width="1.4" points="${pts}"/></svg>`; };
+let selCoin = null;
 const hhmm = t => new Date(t*1000).toLocaleTimeString('es-ES',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
 
 function renderCoins(st){
@@ -76,12 +96,16 @@ function renderCoins(st){
   if(!cs.length){ el.innerHTML = '<div class="empty">Sin posiciones todavía…</div>'; return; }
   el.innerHTML = cs.map(c => {
     const g = c.gross_usd || 1, lp = (c.long_usd/g*100).toFixed(1);
-    return `<div class="card">
+    const chips = [`<span class="chip ${c.confidence>=0.65?'ok':''}">conf ${(c.confidence*100).toFixed(0)}%</span>`,
+      c.concentrated?`<span class="chip warn">1 wallet = ${(c.top1_share*100).toFixed(0)}%</span>`:'',
+      c.n_excluded?`<span class="chip">${c.n_excluded} MM excl.</span>`:''].join('');
+    return `<div class="card ${selCoin===c.coin?'sel':''}" onclick="showLiq('${c.coin}')">
       <div class="row"><span class="coin">${c.coin}</span><span class="tag ${c.label}">${c.label} ${(c.bias*100).toFixed(0)}</span></div>
       <div class="bar"><i class="l" style="width:${lp}%"></i><i class="s" style="width:${100-lp}%"></i></div>
       <div class="row"><span class="pos">L ${fmt(c.long_usd)} · ${c.n_long}</span><span class="neg">${c.n_short} · ${fmt(c.short_usd)} S</span></div>
       <div class="meta" style="margin-top:6px"><span>Neto <b class="${cls(c.net_usd)}">${fmt(c.net_usd)}</b></span><span>Amplitud ${(c.breadth*100).toFixed(0)}%</span><span>Mark ${px(c.mark)}</span></div>
       <div class="meta" style="margin-top:4px">${dlt(c.delta_1h,'1h')}${dlt(c.delta_4h,'4h')}${dlt(c.delta_24h,'24h')}</div>
+      ${spark(c.spark)}<div class="chips">${chips}</div>
     </div>`; }).join('');
 }
 
@@ -90,7 +114,8 @@ function renderStatus(st){
   dot.className = 'dot' + (s.phase==='live' && s.ws_connected ? ' on' : s.phase==='error' ? ' err' : '');
   const txt = {ranking:'descargando leaderboard…',seeding:'cargando posiciones…',live:s.ws_connected?'en vivo':'reconectando…',error:'error: '+s.detail,init:'iniciando…'}[s.phase] || s.phase;
   $('#status').textContent = txt;
-  $('#counts').textContent = `${st.wallets_tracked} wallets · ${st.open_positions} posiciones · Sharpe ${s.sharpe_done}/${st.wallets_tracked}`;
+  $('#counts').textContent = `${st.wallets_tracked} wallets (${st.market_makers} MM${st.include_mm?' incl.':' excl.'}) · ${st.open_positions} pos. · Sharpe ${s.sharpe_done}/${st.wallets_tracked}`;
+  $('#banner').style.display = (st.stale && s.phase==='live') ? 'block' : 'none';
 }
 
 function evHTML(e){
@@ -102,9 +127,10 @@ function evHTML(e){
 function setFeed(list){ $('#feed').innerHTML = list.length ? list.map(evHTML).join('') : '<div class="empty">Esperando movimientos…</div>'; }
 
 async function loadWallets(){
-  const rows = await (await fetch('/api/wallets')).json();
+  let rows = await (await fetch('/api/wallets')).json();
+  const hide = $('#hidemm').checked; rows = hide ? rows.filter(w=>w.style!=='market_maker') : rows;
   $('#wallets tbody').innerHTML = rows.slice(0,60).map(w => `<tr>
-    <td title="${w.address}">${short(w.address)}${w.custom?' ★':''}</td><td>${fmt(w.account_value)}</td>
+    <td title="${w.address}">${short(w.address)}${w.custom?' ★':''}</td><td class="sty ${w.style}">${({market_maker:'MM',directional:'direccional',hedged:'cubierta',flat:'sin pos.'})[w.style]||w.style}</td><td>${fmt(w.account_value)}</td>
     <td>${w.sharpe_30d==null?'—':w.sharpe_30d.toFixed(2)}</td><td>${w.score.toFixed(2)}</td>
     <td>${w.n_positions}</td><td>${fmt(w.gross_usd)}</td><td class="${cls(w.net_usd)}">${fmt(w.net_usd)}</td>
     <td>${w.top_coin? w.top_coin+' '+(w.top_side==='long'?'L':'S') : '—'}</td></tr>`).join('');
@@ -113,6 +139,24 @@ async function tick(){
   try{ const st = await (await fetch('/api/state')).json(); renderStatus(st); renderCoins(st); }
   catch(e){ $('#status').textContent='sin conexión con el servidor'; $('#dot').className='dot err'; }
 }
+async function showLiq(coin){
+  selCoin = coin; const el = $('#liq');
+  const r = await fetch('/api/liqmap/'+coin); if(!r.ok){ el.style.display='none'; return; }
+  const m = await r.json(), mx = Math.max(1, ...m.bins.map(b=>Math.max(b.long_usd,b.short_usd)));
+  const rows = [...m.bins].reverse().map(b => {
+    const mid=(b.px_lo+b.px_hi)/2, isMark = m.mark>=b.px_lo && m.mark<b.px_hi;
+    return `<div class="lq ${isMark?'mark':''}"><span>${px(mid)}</span><span class="b">`+
+      (b.short_usd?`<i class="s" style="width:${b.short_usd/mx*100}%"></i><span>&nbsp;${fmt(b.short_usd)}</span>`:'')+
+      (b.long_usd?`<i class="l" style="width:${b.long_usd/mx*100}%"></i><span>&nbsp;${fmt(b.long_usd)}</span>`:'')+
+      (isMark?`&nbsp;◀ mark ${px(m.mark)}`:'')+`</span></div>`; }).join('');
+  const near = m.nearest.map(n=>`<div class="meta"><span>${short(n.address)}</span><span class="${n.side==='long'?'pos':'neg'}">${n.side}</span><span>${fmt(n.notional)}</span><span>liq ${px(n.liq_px)} (${n.dist_pct.toFixed(1)}%)</span>${n.lev?`<span>${n.lev}x</span>`:''}</div>`).join('');
+  el.style.display='block';
+  el.innerHTML = `<div class="row"><b>${coin} · liquidaciones pendientes de las ballenas</b><span class="meta"><span class="pos">largos ${fmt(m.total_long_liq)}</span><span class="neg">cortos ${fmt(m.total_short_liq)}</span></span></div>
+    <div class="meta" style="margin:4px 0 8px">Barras rojas (arriba del mark) = cortos que se liquidarían; verdes (abajo) = largos. Rango ±30 %; fuera de rango: largos ${fmt(m.outside_long)}, cortos ${fmt(m.outside_short)}. Los precios de liquidación se actualizan cada ~5 min.</div>
+    ${rows}<div style="margin-top:10px"><div class="meta"><b>Más cercanas al mark</b></div>${near||'<div class="meta">—</div>'}</div>`;
+  tick();
+}
+$('#hidemm').addEventListener('change', loadWallets);
 (async () => {
   await tick(); loadWallets();
   setFeed(await (await fetch('/api/events?limit=100')).json());

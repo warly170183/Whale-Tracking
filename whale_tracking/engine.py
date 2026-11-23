@@ -12,7 +12,8 @@ from typing import Any
 
 import websockets
 
-from .aggregate import BiasHistory, compute_bias, pinned_first
+from .aggregate import EXCLUDED_DEFAULT, BiasHistory, build_liq_map, compute_bias, pinned_first
+from .classify import classify
 from .config import Settings
 from .hl_client import InfoClient
 from .ranking import apply_portfolio, select_watchlist
@@ -31,6 +32,7 @@ class Engine:
         self.watch: frozenset[str] = frozenset()
         self.marks: dict[str, float] = {}
         self.history = BiasHistory()
+        self.exclude = frozenset() if cfg.include_mm else EXCLUDED_DEFAULT
         self.events: deque[dict] = deque(maxlen=500)
         self.subscribers: set[asyncio.Queue] = set()
         self.seen = SeenTids()
@@ -50,6 +52,7 @@ class Engine:
         for t in self._tasks:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await t
+        self._save_history()
         await self.client.close()
 
     async def _run(self) -> None:
@@ -64,6 +67,8 @@ class Engine:
 
             self._phase("seeding", f"cargando posiciones de {len(self.wallets)} wallets")
             await self._seed_all()
+            self.refresh_styles()
+            self._load_history()
 
             self._phase("live", "")
             loops = [self._listener(), self._reconcile_loop(), self._history_loop()]
@@ -104,6 +109,7 @@ class Engine:
         while not self._stop.is_set():
             await asyncio.sleep(self.cfg.reconcile_s)
             await self._seed_all(guard=True)
+            self.refresh_styles()
 
     # ── WebSocket ────────────────────────────────────────────────────────────
     async def _listener(self) -> None:
@@ -186,9 +192,33 @@ class Engine:
 
     # ── series y Sharpe ──────────────────────────────────────────────────────
     async def _history_loop(self) -> None:
+        last_save = time.time()
         while not self._stop.is_set():
             self.history.add(time.time(), self.bias())
+            if time.time() - last_save >= 300:
+                self._save_history()
+                last_save = time.time()
             await asyncio.sleep(self.cfg.history_s)
+
+    def _history_path(self):
+        return self.cfg.data_dir / "history.json"
+
+    def _load_history(self) -> None:
+        try:
+            self.history.load(json.loads(self._history_path().read_text()), min_ts=time.time() - 25 * 3600)
+        except (OSError, ValueError):
+            pass
+
+    def _save_history(self) -> None:
+        try:
+            self.cfg.data_dir.mkdir(parents=True, exist_ok=True)
+            self._history_path().write_text(json.dumps(self.history.dump()))
+        except OSError as e:
+            log.warning("no se pudo guardar el histórico: %s", e)
+
+    def refresh_styles(self) -> None:
+        for a, w in self.wallets.items():
+            w.style = classify(w, self.book.of_wallet(a), self.marks, self.cfg.mm_turnover)
 
     def _cache_path(self):
         return self.cfg.data_dir / "sharpe_cache.json"
@@ -229,7 +259,40 @@ class Engine:
 
     # ── lecturas ─────────────────────────────────────────────────────────────
     def bias(self) -> dict[str, dict]:
-        return compute_bias(self.book, self.wallets, self.marks, self.cfg.bias_threshold)
+        return compute_bias(self.book, self.wallets, self.marks, self.cfg.bias_threshold, self.exclude)
+
+    def stale(self) -> bool:
+        t = self.status["last_trade_ts"]
+        return not self.status["ws_connected"] or t is None or time.time() - t > 120
+
+    def signal(self, coin: str, bias: dict[str, dict] | None = None) -> dict | None:
+        """Señal compacta y exportable para otras apps. Es CONTEXTO de posicionamiento, no un veredicto."""
+        bias = bias or self.bias()
+        b = bias.get(coin.upper())
+        if not b:
+            return None
+        now = time.time()
+        return {
+            "coin": b["coin"], "label": b["label"], "bias": round(b["bias"], 4),
+            "confidence": b["confidence"], "confidence_note": "heurístico, sin calibrar",
+            "n_wallets": b["n_wallets"], "n_long": b["n_long"], "n_short": b["n_short"],
+            "long_usd": round(b["long_usd"]), "short_usd": round(b["short_usd"]), "net_usd": round(b["net_usd"]),
+            "breadth": round(b["breadth"], 4), "top1_share": round(b["top1_share"], 3),
+            "concentrated": b["concentrated"], "n_market_makers_excluded": b["n_excluded"],
+            "delta_1h": self.history.delta(b["coin"], now, 3600),
+            "delta_4h": self.history.delta(b["coin"], now, 4 * 3600),
+            "delta_24h": self.history.delta(b["coin"], now, 24 * 3600),
+            "as_of": now, "stale": self.stale(), "source": "hyperliquid-public", "kind": "context",
+        }
+
+    def signals(self, min_wallets: int = 3) -> list[dict]:
+        bias = self.bias()
+        cs = [c for c in bias if bias[c]["n_wallets"] >= min_wallets]
+        cs.sort(key=lambda c: bias[c]["gross_usd"], reverse=True)
+        return [self.signal(c, bias) for c in pinned_first(cs)]
+
+    def liq_map(self, coin: str) -> dict | None:
+        return build_liq_map(self.book, self.wallets, self.marks, coin.upper(), exclude_styles=self.exclude)
 
     def snapshot(self) -> dict:
         now = time.time()
@@ -240,9 +303,12 @@ class Engine:
             b["delta_1h"] = self.history.delta(c, now, 3600)
             b["delta_4h"] = self.history.delta(c, now, 4 * 3600)
             b["delta_24h"] = self.history.delta(c, now, 24 * 3600)
+            b["spark"] = [round(v, 3) for _, v in self.history.series(c, now - 24 * 3600, 60)]
             coins.append(b)
         return {
-            "status": self.status, "now": now,
+            "status": self.status, "now": now, "stale": self.stale(),
+            "market_makers": sum(1 for w in self.wallets.values() if w.style == "market_maker"),
+            "include_mm": not self.exclude,
             "wallets_tracked": len(self.wallets), "open_positions": len(self.book.positions),
             "coins": coins,
         }
@@ -259,7 +325,8 @@ class Engine:
                 "sharpe_30d": w.sharpe_30d, "sharpe_all": w.sharpe_all, "mdd_30d": w.mdd_30d,
                 "month_pnl": w.month_pnl, "n_positions": len(ps), "gross_usd": gross, "net_usd": net,
                 "top_coin": top.coin if top else None, "top_side": top.side if top else None,
-                "custom": w.custom,
+                "custom": w.custom, "style": w.style,
+                "turnover": (w.month_vlm / (w.lb_account or w.account_value)) if (w.lb_account or w.account_value) else None,
             })
         rows.sort(key=lambda r: r["gross_usd"], reverse=True)
         return rows

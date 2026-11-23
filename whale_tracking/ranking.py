@@ -30,7 +30,8 @@ def _window(row: dict, name: str) -> dict:
 
 
 def select_watchlist(rows: list[dict], cfg: Settings) -> list[WalletInfo]:
-    """Top N por valor de cuenta entre las que tienen volumen reciente y PnL histórico positivo."""
+    """Top N por valor de cuenta con volumen reciente, PnL histórico positivo y que no sean market makers
+    (volumen 30d / cuenta >= mm_turnover), salvo include_mm."""
     cands: list[WalletInfo] = []
     for r in rows:
         addr = str(r.get("ethAddress", "")).lower()
@@ -46,7 +47,9 @@ def select_watchlist(rows: list[dict], cfg: Settings) -> list[WalletInfo]:
             continue
         if acct < cfg.min_account or vlm < cfg.min_month_vlm or apnl <= 0:
             continue
-        cands.append(WalletInfo(address=addr, account_value=acct, month_pnl=float(m.get("pnl", 0)),
+        if not cfg.include_mm and acct > 0 and vlm / acct >= cfg.mm_turnover:
+            continue  # market maker: no entra en la cesta direccional
+        cands.append(WalletInfo(address=addr, account_value=acct, lb_account=acct, month_pnl=float(m.get("pnl", 0)),
                                 alltime_pnl=apnl, month_vlm=vlm))
     cands.sort(key=lambda w: w.account_value, reverse=True)
     chosen = cands[: cfg.watch_size]
