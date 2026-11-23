@@ -17,7 +17,8 @@ pytest                            # tests
 ## Cómo funciona
 
 1. **Selección** (`ranking.py`): descarga el leaderboard y se queda con las N cuentas más grandes con
-   volumen reciente y PnL histórico positivo (+ tus wallets en `WT_EXTRA_WALLETS`).
+   volumen reciente y PnL histórico positivo, **sin market makers** (volumen 30 d / cuenta ≥ 60×) y con
+   tus wallets de `WT_EXTRA_WALLETS`. Estilo por wallet en `classify.py`: direccional / cubierta / sin posiciones.
 2. **Semilla** (`resolve.py`): lee las posiciones actuales de cada wallet (`clearinghouseState`).
 3. **En vivo** (`engine.py`): un único WebSocket con el feed público de trades de todos los perps. Cada
    trade trae a las dos contrapartes; se filtran las vigiladas y se pliegan en un libro de posiciones
@@ -27,6 +28,11 @@ pytest                            # tests
    contar depósitos). Se traduce a un peso 0.2–1.0 (sin datos = 0.5), con caché de 24 h en `data/`.
 6. **Sesgo** (`aggregate.py`): por activo, `bias = Σ peso·signo·nocional / Σ peso·nocional ∈ [−1, 1]`,
    amplitud (wallets largas − cortas) y cambio a 1 h / 4 h / 24 h. `LARGO/CORTO` si |sesgo| ≥ 0.25.
+   Cada activo lleva una **confianza** 0–1 (nº de wallets, concentración, acuerdo amplitud/sesgo, fuerza;
+   heurística **sin calibrar**) y un aviso si una sola wallet pesa ≥ 50 %.
+7. **Mapa de liquidaciones** (`build_liq_map`): liquidaciones pendientes de las posiciones seguidas por
+   precio (largos bajo el mark, cortos sobre él). Clic en un activo del panel. Se refresca con la reconciliación.
+8. **Histórico persistente** en `data/history.json`: los deltas de 1 h/4 h/24 h sobreviven a un reinicio.
 
 ## API
 
@@ -37,26 +43,32 @@ pytest                            # tests
 | `GET /api/events?limit=` | últimos eventos |
 | `GET /api/stream` | SSE con eventos en vivo |
 | `GET /api/history/{coin}` | serie del sesgo |
+| `GET /api/signals?min_wallets=3` | **señales exportables** por activo (sesgo, confianza, deltas, `stale`) para otras apps |
+| `GET /api/signal/{coin}` | la misma señal de un solo activo (404 si no hay posiciones) |
+| `GET /api/liqmap/{coin}` | liquidaciones pendientes agrupadas por precio |
 
 ## Configuración (`WT_*`)
 
 `WATCH_SIZE` (100), `MIN_ACCOUNT` (1e6), `MIN_MONTH_VLM` (1e7), `EXTRA_WALLETS` (coma),
 `COINS` (vacío = todos), `RECONCILE_S` (300), `EVENT_MIN_USD` (100000), `BIAS_THRESHOLD` (0.25),
-`SHARPE` (0 para desactivar), `DATA_DIR`, `HOST`, `PORT`.
+`MM_TURNOVER` (60), `INCLUDE_MM` (1 para incluir market makers), `SHARPE` (0 para desactivar), `DATA_DIR`, `HOST`, `PORT`.
 
 ## Limitaciones conocidas
 
 - Solo posiciones de la cuenta principal de cada wallet (no subcuentas ni vaults).
-- Los market makers hedgeados aportan poco sesgo neto; el peso por Sharpe no los distingue de los direccionales.
+- La detección de market makers es heurística (volumen/cuenta del leaderboard, que no equivale a la equity perp).
+- El valor de cuenta del leaderboard es mucho mayor que la equity perp en muchas wallets: la cesta se elige por riqueza total, no por capital en perps.
+- La confianza del sesgo es una heurística sin calibrar; no está validada contra retornos.
+- Los precios de liquidación del mapa pueden tener hasta ~5 min de retraso.
 - El leaderboard no es "todas las ballenas": es un muestreo por tamaño y actividad.
 - Los eventos en vivo dependen del WebSocket; si se corta, se resincroniza en la siguiente reconciliación.
 - Sin persistencia de posiciones/eventos: al reiniciar se reconstruye desde la cadena.
 
 ## Hoja de ruta
 
+- Validar el sesgo contra retornos futuros (IC de Spearman, como `basket_positioning.py` de hollowc2).
 - Detectores de microestructura (ráfagas de trades grandes, barridos, icebergs) con libro L2 — ver `THIRD_PARTY_NOTICES.md`.
-- Mapa de liquidaciones de las posiciones seguidas (`liq_px` ya se guarda).
-- Exportar el sesgo como módulo/JSON para integrarlo en otras apps de análisis (filtro de confianza junto al régimen HMM).
-- Clasificación de estilo de wallet (swing / market maker) y filtro direccional.
+- Cliente Python mínimo para consumir `/api/signals` desde tus otras apps.
+- Estilo de wallet por fills (swing vs scalper) y subcuentas.
 
 Atribuciones de código de terceros en [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
